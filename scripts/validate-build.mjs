@@ -87,6 +87,12 @@ try {
   for (let i = 0; i < a.length; i++) assert.deepEqual(a[i][1], b[i][1], `nondeterministic artifact: ${a[i][0]}`);
   console.log(`PASS: two deterministic builds; ${snapshot.protocols.length} snapshot protocols; ${snapshot.watchlist.length}/${snapshot.watchlist.length} watchlist covered; ${JSON.parse(readFileSync(join(first, 'board.json'), 'utf8')).rows.length} eligible rows; ${readdirSync(join(first, 'screenshots')).length} screenshots; dossier matches buildDossier.`);
   console.log(`Build logs: ${firstLog.split('\n')[0]} | ${secondLog.split('\n')[0]}`);
+  const cliTests = spawnSync(process.execPath, [join(root, 'scripts', 'test-cli.mjs'), snapshotPath], {
+    cwd: root, encoding: 'utf8', timeout: 180_000, maxBuffer: 4 * 1024 * 1024,
+  });
+  assert.equal(cliTests.status, 0, `CLI regression suite failed (${cliTests.status}):\n${cliTests.stderr}\n${cliTests.stdout}`);
+  process.stdout.write(cliTests.stdout);
 } finally {
   rmSync(scratch, { recursive: true, force: true });
 }
+[exit status 0]

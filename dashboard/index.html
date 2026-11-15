@@ -4,13 +4,17 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#08120f">
-<title>Token Radar — Launch intelligence</title>
+<meta name="description" content="An offline, snapshot-based protocol research board with peer valuation scenarios, evidence, and explicit data limits.">
+<title>Token Radar — Snapshot research board</title>
 <link rel="stylesheet" href="app.css">
 </head>
 <body>
 <a class="skip" href="#main">Skip to research board</a>
-<div id="app" aria-busy="true"></div>
+<div id="app" aria-busy="true" aria-label="Token Radar research board">
+<main id="main" class="loading" aria-live="polite"><h1>Loading the local research board</h1><p>If this message remains, open the generated dashboard folder so its sibling data.js file can load.</p></main>
+</div>
 <script src="../data.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
+[exit status 0]

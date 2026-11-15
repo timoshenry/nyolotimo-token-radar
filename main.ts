@@ -13,10 +13,10 @@
 // Outside the grader's container, MAKEFUN_OUTPUT_DIR stands in for /output:
 //   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts --input ../input/snapshot.json
 
-import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { boardIssue, buildRadar, dataScript, exclusionReason, isPreToken, isRankable, parseSnapshot } from './lib/model.ts';
+import { boardIssue, buildRadar, dataScript, isPreToken, parseSnapshot } from './lib/model.ts';
 import { buildDossier } from './vendor/makefun-board.ts';
 
 const here = fileURLToPath(new URL('.', import.meta.url));
@@ -31,8 +31,13 @@ const DOSSIER_MAX_BYTES = 1_572_864;
 const PROTOCOL_FIELDS = ['slug', 'name', 'category', 'chains', 'tvl_usd', 'change_7d', 'mcap_usd', 'listed_at', 'gecko_id', 'symbol'];
 
 function fail(message: string, code = 1): never {
-  process.stderr.write(`token radar: integrity check failed: ${message}\n`);
+  process.stderr.write(`token radar: ${message}\n`);
   process.exit(code);
+}
+
+function usage(): never {
+  process.stdout.write('Usage: node main.ts [--input <snapshot.json|directory>] [--output <directory>] [--help]\n');
+  process.exit(0);
 }
 
 /** Reject malformed input before parsing can normalize an invalid field into a plausible null. */
@@ -41,8 +46,8 @@ function validateSnapshotInput(rawText: string): void {
   try { raw = JSON.parse(rawText); } catch { fail('snapshot is not valid JSON'); }
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) fail('snapshot root must be an object');
   const o = raw as Record<string, unknown>;
-  if (typeof o.as_of !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(o.as_of)) fail('snapshot as_of must be an ISO date');
-  if (typeof o.source !== 'string' || !o.source.trim()) fail('snapshot source is missing');
+  if (typeof o.as_of !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(o.as_of) || !Number.isFinite(Date.parse(`${o.as_of}T00:00:00Z`)) || new Date(`${o.as_of}T00:00:00Z`).toISOString().slice(0, 10) !== o.as_of) fail('snapshot as_of must be a real YYYY-MM-DD calendar date');
+  if (typeof o.source !== 'string' || !o.source.trim() || o.source.length > 500) fail('snapshot source must be a non-empty string of at most 500 characters');
   if (!Number.isSafeInteger(o.floor_usd) || Number(o.floor_usd) <= 0) fail('snapshot floor_usd must be a positive safe integer');
   if (!Array.isArray(o.protocols) || o.protocols.length < 100 || o.protocols.length > 20_000) fail('snapshot protocols array is outside the supported bounds');
   if (!Array.isArray(o.watchlist) || o.watchlist.length === 0 || o.watchlist.length > o.protocols.length) fail('snapshot watchlist is empty or outside the supported bounds');
@@ -56,7 +61,8 @@ function validateSnapshotInput(rawText: string): void {
     seen.add(entry.slug);
     if (typeof entry.name !== 'string' || !entry.name.trim()) fail(`protocol ${entry.slug} has no name`);
     if (entry.category !== null && typeof entry.category !== 'string') fail(`protocol ${entry.slug} has invalid category`);
-    if (!Array.isArray(entry.chains) || entry.chains.some((c) => typeof c !== 'string')) fail(`protocol ${entry.slug} has invalid chains`);
+    if (!Array.isArray(entry.chains) || entry.chains.some((c) => typeof c !== 'string' || !c.trim()) || new Set(entry.chains).size !== entry.chains.length) fail(`protocol ${entry.slug} has invalid or duplicate chains`);
+    if (entry.listed_at !== null && (typeof entry.listed_at !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(entry.listed_at) || !Number.isFinite(Date.parse(`${entry.listed_at}T00:00:00Z`)) || new Date(`${entry.listed_at}T00:00:00Z`).toISOString().slice(0, 10) !== entry.listed_at)) fail(`protocol ${entry.slug} has invalid listed_at date`);
     if (!Number.isSafeInteger(entry.tvl_usd) || Number(entry.tvl_usd) < 5_000_000) fail(`protocol ${entry.slug} has invalid TVL`);
     for (const field of ['change_7d', 'mcap_usd']) if (entry[field] !== null && (typeof entry[field] !== 'number' || !Number.isFinite(entry[field]))) fail(`protocol ${entry.slug} has invalid ${field}`);
     for (const field of ['listed_at', 'gecko_id', 'symbol']) if (entry[field] !== null && typeof entry[field] !== 'string') fail(`protocol ${entry.slug} has invalid ${field}`);
@@ -99,26 +105,59 @@ function deterministicBuild(snapshot: ReturnType<typeof parseSnapshot>) {
   if (issue !== null) fail(`board contract rejected: ${issue}`);
   for (const slug of snapshot.watchlist) {
     const p = snapshot.protocols.find((row) => row.slug === slug);
-    if (!p || !isPreToken(p) || !isRankable(p) || exclusionReason(p) !== null) fail(`watchlist entry ${slug} is not eligible under the board screen`);
+    if (!p || !isPreToken(p)) fail(`watchlist entry ${slug} has recorded token fields or is missing`);
+    // Lexically flagged watchlist rows remain covered; boardIssue checks this exception explicitly.
   }
   return first;
 }
 
-/** --name <value> out of the arguments, or the fallback. */
-function arg(name: string, fallback: string): string {
-  const at = process.argv.indexOf(`--${name}`);
-  if (at >= 0 && at + 1 < process.argv.length) return process.argv[at + 1]!;
-  const withEquals = process.argv.find((a) => a.startsWith(`--${name}=`));
-  return withEquals === undefined ? fallback : withEquals.slice(name.length + 3);
+/** Parse only the two documented options; reject typos and ambiguous repeats. */
+function argumentsFrom(argv: string[]): { input: string; output: string } {
+  const values = new Map<string, string>();
+  for (let i = 0; i < argv.length; i++) {
+    const token = argv[i]!;
+    if (token === '--help' || token === '-h') usage();
+    const match = /^(--input|--output)(?:=(.*))?$/.exec(token);
+    if (!match) fail(`unknown argument ${token}; use --help for usage`, 2);
+    const key = match[1]!.slice(2);
+    const value = match[2] ?? argv[++i];
+    if (value === undefined || value.length === 0 || value.startsWith('--')) fail(`${match[1]} requires a non-empty value`, 2);
+    if (values.has(key)) fail(`${match[1]} was supplied more than once`, 2);
+    values.set(key, value);
+  }
+  return { input: values.get('input') ?? '/input', output: values.get('output') ?? process.env.MAKEFUN_OUTPUT_DIR ?? '/output' };
 }
 
-const inputArg = arg('input', '/input');
+function within(parent: string, child: string): boolean {
+  const rel = relative(parent, child);
+  return rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+}
+
+/** Resolve a not-yet-created output through its nearest real parent before mkdir can touch it. */
+function projectedPath(path: string): string {
+  let ancestor = path;
+  while (!existsSync(ancestor)) ancestor = dirname(ancestor);
+  return resolve(realpathSync(ancestor), relative(ancestor, path));
+}
+
+const args = argumentsFrom(process.argv.slice(2));
+const inputArg = resolve(args.input);
 const inputFile = inputArg.endsWith('.json') ? inputArg : join(inputArg, 'snapshot.json');
 if (!existsSync(inputFile)) {
   process.stderr.write(`token radar: no snapshot at ${inputFile}: pass --input <snapshot.json|directory> or mount the sealed /input\n`);
   process.exit(2);
 }
-const out = arg('output', process.env.MAKEFUN_OUTPUT_DIR ?? '/output');
+if (!statSync(inputFile).isFile()) fail(`input is not a regular file: ${inputFile}`, 2);
+const out = resolve(args.output);
+const repo = resolve(here);
+const sourceAssets = [repo, join(repo, 'dashboard'), join(repo, 'screenshots')];
+const resolvedInput = realpathSync(inputFile);
+if (existsSync(out) && !lstatSync(out).isDirectory()) fail(`output path must be a directory, not a file or symlink: ${out}`, 2);
+const projectedOut = projectedPath(out);
+if (sourceAssets.some((source) => within(projectedOut, source) || within(source, projectedOut))) {
+  fail(`output ${projectedOut} overlaps repository source; choose a separate output directory`, 2);
+}
+if (projectedOut === resolvedInput || within(projectedOut, resolvedInput)) fail(`output ${projectedOut} would overwrite or contain the input snapshot`, 2);
 
 const inputText = readFileSync(inputFile, 'utf8');
 validateSnapshotInput(inputText);
@@ -126,6 +165,8 @@ const snapshot = parseSnapshot(inputText);
 const { board, radar } = deterministicBuild(snapshot);
 
 mkdirSync(out, { recursive: true });
+const realOut = realpathSync(out);
+if (sourceAssets.some((source) => within(realOut, source) || within(source, realOut))) fail(`resolved output ${realOut} overlaps repository source`, 2);
 // The output is generated data. Clear managed trees so an earlier build cannot leave stale assets.
 rmSync(join(out, 'dashboard'), { recursive: true, force: true });
 rmSync(join(out, 'screenshots'), { recursive: true, force: true });
@@ -182,6 +223,9 @@ validateDashboard(join(out, 'dashboard'));
 writeFileSync(join(out, 'dossier.json'), buildDossier(out, { text_max_bytes: TEXT_MAX_BYTES, screenshots: SCREENSHOT_CAPS, dashboard: { max_files: DASHBOARD_CAPS.files, max_bytes: DASHBOARD_CAPS.bytes } }));
 const dossierBytes = statSync(join(out, 'dossier.json')).size;
 if (dossierBytes > DOSSIER_MAX_BYTES) fail(`dossier is ${dossierBytes} bytes, above ${DOSSIER_MAX_BYTES}`);
+const persistedBoard = JSON.parse(readFileSync(join(out, 'board.json'), 'utf8')) as { rows?: unknown };
+if (!Array.isArray(persistedBoard.rows) || JSON.stringify(persistedBoard.rows) !== JSON.stringify(radar.rows)) fail('board.json and dashboard data diverged');
+if (radar.rows.length > 1 && new Set(radar.rows.map((row) => row.implied_value_usd)).size === 1) fail('board has no value differentiation');
 const boardBytes = statSync(join(out, 'board.json')).size;
 if (boardBytes > 8_388_608) fail(`board.json is ${boardBytes} bytes, above 8 MiB`);
 
@@ -189,3 +233,4 @@ process.stdout.write(
   `token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.early_size} early, ${radar.live_size} live set aside)\n` +
     `token radar: wrote ${join(out, 'board.json')}, ${join(out, 'data.js')}, ${join(out, 'dashboard')} (3 files), ${join(out, 'screenshots')} (${shots.length} images) and ${join(out, 'dossier.json')}\n`,
 );
+[exit status 0]

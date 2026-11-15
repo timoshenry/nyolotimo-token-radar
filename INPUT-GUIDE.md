@@ -1,47 +1,63 @@
-# The token-radar snapshot
+# Reading the token-radar snapshot
 
-`snapshot.json` in this directory is the frozen protocol data your entry reads. The house fetched it once from DefiLlama's public API, when it built this competition's input, and every run of your entry and the grade itself read the same bytes. It does not move under you and it is not updated: treat it as read-only.
+The entry reads the competition's frozen `snapshot.json`. The competition kit supplies it; the entry does not fetch newer values. Repeated runs therefore use identical input bytes. Treat this file as read-only.
 
-The `source` field names the endpoint and the exact fetch time; `as_of` is that fetch's UTC date.
+`source` records the upstream endpoint and fetch timestamp. `as_of` is the corresponding UTC date. The source text is provenance, not a guarantee that any field is current today.
 
-## The file
+## Top-level fields
 
 | Key | Type | Meaning |
 | --- | --- | --- |
-| `as_of` | string, `YYYY-MM-DD` | The UTC date of the fetch. |
-| `source` | string | `DefiLlama https://api.llama.fi/protocols, fetched <ISO datetime>`: where the data came from, and when. |
-| `floor_usd` | number | The watchlist's floor in whole US dollars. This snapshot's is $50,000,000. |
-| `protocols` | object[] | Every protocol at or above $5,000,000 of TVL, one object each, sorted by `slug` ascending. A protocol under $5,000,000, or one DefiLlama gives no slug, name or TVL for, is not in the file. |
-| `watchlist` | string[] | The `slug` of every protocol that meets the watchlist's definition below, ascending. |
+| `as_of` | `YYYY-MM-DD` string | UTC date attached to the snapshot. |
+| `source` | string | Upstream source description and fetch time. |
+| `floor_usd` | number | TVL threshold used to define the watchlist. The supplied snapshot uses $50 million. |
+| `protocols` | object array | Source records at or above $5 million TVL, ordered by slug. This is not the full universe of protocols. |
+| `watchlist` | string array | Slugs selected by the competition's watchlist rules, also ordered by slug. The list defines required coverage, not model rank or an upper limit on discoveries. |
 
-Every object in `protocols` carries exactly these ten fields, and no others.
+## Protocol record
+
+Each protocol object has exactly ten fields. The build checks that sealed shape before parsing it into model records.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `slug` | string | DefiLlama's slug for the protocol. It is unique in the file, and `watchlist` names protocols by it. |
-| `name` | string | The protocol's name as DefiLlama writes it. |
-| `category` | string or null | DefiLlama's category, such as `Dexs`, `Lending` or `Bridge`; null when it names none. |
-| `chains` | string[] | The chains DefiLlama counts the protocol's TVL on, as it names them (`Ethereum`, `Solana`, `Base` and so on). |
-| `tvl_usd` | number | The protocol's TVL in whole US dollars, truncated toward zero, never rounded up. |
-| `change_7d` | number or null | Its TVL's change over 7 days, in per cent: `12.5` is +12.5% and `-4` is -4%. Rounded to 4 decimal places. null when DefiLlama reports none. |
-| `mcap_usd` | number or null | The market cap of its token in whole US dollars, truncated toward zero; null when it records no token or no market cap. |
-| `listed_at` | string, `YYYY-MM-DD`, or null | The UTC day DefiLlama began tracking the protocol; null when it reports none. |
-| `gecko_id` | string or null | Its token's CoinGecko id; null when it records no token. |
-| `symbol` | string or null | Its token's ticker; null when it records no token. DefiLlama's `-` placeholder is written as null. |
+| `slug` | string | Unique source identifier; watchlist entries refer to it. |
+| `name` | string | Source display name. |
+| `category` | string or null | Source category, such as `Dexs` or `Lending`. |
+| `chains` | string array | Chain names associated with the record. |
+| `tvl_usd` | integer | Whole-dollar TVL, truncated toward zero by the snapshot producer. |
+| `change_7d` | number or null | Seven-day TVL percentage change: `12.5` means +12.5%. This is a short window and may be noisy. |
+| `mcap_usd` | number or null | Whole-dollar token market cap when recorded; null if absent in the snapshot. |
+| `listed_at` | date string or null | Day tracking began in the upstream source, not a verified protocol launch date. |
+| `gecko_id` | string or null | Token's CoinGecko identifier when recorded. |
+| `symbol` | string or null | Token ticker when recorded; the producer maps its `-` placeholder to null. |
 
-## The watchlist
+## Watchlist and model eligibility
 
-`watchlist` holds the `slug` of every protocol in `protocols` that:
+The supplied watchlist was selected from records meeting the TVL floor, with token and exclusion rules applied by the competition's snapshot process. Parent-protocol information used by that process is not included in the ten-field record. Do not try to reconstruct parent relationships from this file.
 
-- has a `tvl_usd` at or above `floor_usd`;
-- records no token: both `gecko_id` and `symbol` are null;
-- has a `name` that does not end in a version marker, a space followed by `V2`, `v2`, `2.0` or the like (the pattern `\s(V\d+(\.\d+)?|v\d+(\.\d+)?|\d+\.\d+)$`);
-- is not a wrapped, staked or bridged product of another protocol: DefiLlama records no parent protocol (`parentProtocol`) for it, its `category` is not `Bridge`, `Canonical Bridge`, `Liquid Staking`, `Liquid Restaking`, `Restaked BTC` or `CEX`, and its `name` carries no whole word `wrapped`, `staked` or `staking` in any case and does not begin with an exchange's name (`Binance`, `Coinbase`, `Bybit`, `Kraken`, `Bitget`, `OKX`, `Bitfinex`, `Gemini`).
+The model treats a record as pre-token only when all three token fields (`mcap_usd`, `gecko_id`, `symbol`) are null. It then applies an explicit text/category exclusion screen for exchange products, versioned deployments, and wrapped, staked, bridged or derivative markers. Watchlist coverage is preserved even when a pre-token entry triggers that stricter screen; that exception is visible as coverage rather than silently dropped. Remaining eligible records below the floor can join the board as early discoveries. Token-bearing records are kept in a separate reference set and are not ranked with pre-token estimates.
 
-A wrapped or staked product of a token that already trades is not a token that does not exist yet: WBTC is Bitcoin on Ethereum, Binance staked ETH is ETH in Binance's staking product, and neither is a protocol still waiting on a launch of its own. `parentProtocol` is not one of the ten fields this file carries; the list is what the rule produced from DefiLlama's record, and it is the list your entry reads.
+The snapshot's row count and $5 million inclusion threshold are boundaries of this input. A protocol missing from the file might be below the threshold or absent from the upstream response; absence is not evidence about its quality or future token plans.
 
-It is a floor, never a ceiling. The house drew a line at a size and left the token-bearing protocols, the versioned ones and the wrapped, staked and bridged products out, and that is the whole of it: a protocol below the floor, or one the list leaves out, is no worse a subject for your entry than one on it, and the list ranks nothing. The floor is where the house's own reading started, not where yours must stop.
+## What these fields cannot tell you
 
-## What is not here
+There is no source score, implied value, rank, revenue, token supply, unlock schedule, ownership rights, launch date, points program, airdrop flag or current product verification in the snapshot. A null token field means only “not recorded here.” The entry derives a peer-based scenario from observed token-bearing records and the available TVL, category, chain, age and short-term change fields. Its heuristics and uncertainty limits are described in the README and dashboard. They are not extra facts supplied by the snapshot.
 
-The snapshot carries no ranking, no implied value, no farm plan and no airdrop flag. It does not say which protocol is worth your time, which one may issue a token, what that token may be worth or what to do about any of it: there is no score, no yield, no strategy and no signal in the file. Deriving them is the entry's work.
+Farm-plan text is generated from category and chain labels. It is a conditional research checklist, not proof that an app, workflow, incentive, contract or redemption route is available. Verify current official documentation and risk terms before taking any action.
+
+## Source fields and derived board values
+
+Only the ten protocol fields above and the top-level snapshot fields are supplied observations. The board's `rank`, `age_days`, `implied_value_usd`, `estimate_low_usd`, `estimate_high_usd`, `confidence`, `confidence_score`, `evidence` breakdown, `on_watchlist` flag and `farm_steps` are generated by this entry. In particular, tracking age is calculated from `listed_at` and `as_of`; it is not another source measurement. Peer ratios come from token-bearing records in this same snapshot, and all adjustment multipliers are model choices. These derived values must not be read as additional upstream facts.
+
+## Reproduce the local result
+
+With the kit snapshot available, run from the repository root:
+
+```sh
+node main.ts --input /path/to/snapshot.json --output /tmp/token-radar-out
+node scripts/validate-build.mjs
+node scripts/test-cli.mjs /path/to/snapshot.json
+```
+
+The build validates input structure and integrity, scores twice to check repeatability, and writes board, dashboard data, static page, screenshots and dossier. The validator makes two temporary builds and compares their output bytes, then tests CLI parsing and output-path protections in child processes. Tests use temporary output and clean it up; none of these commands updates the frozen input.
+[exit status 0]
